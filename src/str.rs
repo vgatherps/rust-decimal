@@ -423,7 +423,7 @@ fn tail_no_has() -> Result<Decimal, Error> {
 }
 
 #[inline]
-fn handle_data<const NEG: bool, const HAS: bool>(data: u128, scale: u8) -> Result<Decimal, Error> {
+pub fn handle_data<const NEG: bool, const HAS: bool>(data: u128, scale: u8) -> Result<Decimal, Error> {
     debug_assert_eq!(data >> 96, 0);
     if !HAS {
         tail_no_has()

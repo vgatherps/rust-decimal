@@ -9,6 +9,8 @@ mod error;
 mod ops;
 mod str;
 
+pub use self::str::handle_data;
+
 // We purposely place this here for documentation ordering
 mod arithmetic_impls;
 
