@@ -10,6 +10,35 @@ use arrayvec::{ArrayString, ArrayVec};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+pub trait DecConverter {
+    type Output;
+    type Error;
+
+    fn convert<const NEG: bool>(mantissa: u128, scale: u8) -> Result<Self::Output, Self::Error>;
+    fn tail_error(err: &'static str) -> Result<Self::Output, Self::Error>;
+}
+
+impl DecConverter for Decimal {
+    type Output = Decimal;
+    type Error = Error;
+
+    #[inline]
+    fn convert<const NEG: bool>(mantissa: u128, scale: u8) -> Result<Self::Output, Self::Error> {
+        Ok(Decimal::from_parts(
+            mantissa as u32,
+            (mantissa >> 32) as u32,
+            (mantissa >> 64) as u32,
+            NEG,
+            scale as u32,
+        ))
+    }
+
+    #[inline]
+    fn tail_error(err: &'static str) -> Result<Self::Output, Self::Error> {
+        tail_error(err)
+    }
+}
+
 // impl that doesn't allocate for serialization purposes.
 pub(crate) fn to_str_internal(
     value: &Decimal,
@@ -156,12 +185,12 @@ pub(crate) fn fmt_scientific_notation(
 
 // dedicated implementation for the most common case.
 #[inline]
-pub(crate) fn parse_str_radix_10(str: &str) -> Result<Decimal, Error> {
+pub fn parse_str_radix_10<D: DecConverter>(str: &str) -> Result<D::Output, D::Error> {
     let bytes = str.as_bytes();
     if bytes.len() < BYTES_TO_OVERFLOW_U64 {
-        parse_str_radix_10_dispatch::<false, true>(bytes)
+        parse_str_radix_10_dispatch::<D, false, true>(bytes)
     } else {
-        parse_str_radix_10_dispatch::<true, true>(bytes)
+        parse_str_radix_10_dispatch::<D, true, true>(bytes)
     }
 }
 
@@ -169,17 +198,19 @@ pub(crate) fn parse_str_radix_10(str: &str) -> Result<Decimal, Error> {
 pub(crate) fn parse_str_radix_10_exact(str: &str) -> Result<Decimal, Error> {
     let bytes = str.as_bytes();
     if bytes.len() < BYTES_TO_OVERFLOW_U64 {
-        parse_str_radix_10_dispatch::<false, false>(bytes)
+        parse_str_radix_10_dispatch::<Decimal, false, false>(bytes)
     } else {
-        parse_str_radix_10_dispatch::<true, false>(bytes)
+        parse_str_radix_10_dispatch::<Decimal, true, false>(bytes)
     }
 }
 
 #[inline]
-fn parse_str_radix_10_dispatch<const BIG: bool, const ROUND: bool>(bytes: &[u8]) -> Result<Decimal, Error> {
+fn parse_str_radix_10_dispatch<D: DecConverter, const BIG: bool, const ROUND: bool>(
+    bytes: &[u8],
+) -> Result<D::Output, D::Error> {
     match bytes {
-        [b, rest @ ..] => byte_dispatch_u64::<false, false, false, BIG, true, ROUND>(rest, 0, 0, *b),
-        [] => tail_error("Invalid decimal: empty"),
+        [b, rest @ ..] => byte_dispatch_u64::<D, false, false, false, BIG, true, ROUND>(rest, 0, 0, *b),
+        [] => D::tail_error("Invalid decimal: empty"),
     }
 }
 
@@ -201,20 +232,28 @@ pub fn overflow_128(val: u128) -> bool {
 /// * BIG - a number that uses 96 bits instead of only 64 bits
 /// * FIRST - true if it is the first byte in the string
 #[inline]
-fn dispatch_next<const POINT: bool, const NEG: bool, const HAS: bool, const BIG: bool, const ROUND: bool>(
+fn dispatch_next<
+    D: DecConverter,
+    const POINT: bool,
+    const NEG: bool,
+    const HAS: bool,
+    const BIG: bool,
+    const ROUND: bool,
+>(
     bytes: &[u8],
     data64: u64,
     scale: u8,
-) -> Result<Decimal, Error> {
+) -> Result<D::Output, D::Error> {
     if let Some((next, bytes)) = bytes.split_first() {
-        byte_dispatch_u64::<POINT, NEG, HAS, BIG, false, ROUND>(bytes, data64, scale, *next)
+        byte_dispatch_u64::<D, POINT, NEG, HAS, BIG, false, ROUND>(bytes, data64, scale, *next)
     } else {
-        handle_data::<NEG, HAS>(data64 as u128, scale)
+        handle_data::<D, NEG, HAS>(data64 as u128, scale)
     }
 }
 
 #[inline(never)]
 fn non_digit_dispatch_u64<
+    D: DecConverter,
     const POINT: bool,
     const NEG: bool,
     const HAS: bool,
@@ -226,17 +265,18 @@ fn non_digit_dispatch_u64<
     data64: u64,
     scale: u8,
     b: u8,
-) -> Result<Decimal, Error> {
+) -> Result<D::Output, D::Error> {
     match b {
-        b'-' if FIRST && !HAS => dispatch_next::<false, true, false, BIG, ROUND>(bytes, data64, scale),
-        b'+' if FIRST && !HAS => dispatch_next::<false, false, false, BIG, ROUND>(bytes, data64, scale),
-        b'_' if HAS => handle_separator::<POINT, NEG, BIG, ROUND>(bytes, data64, scale),
-        b => tail_invalid_digit(b),
+        b'-' if FIRST && !HAS => dispatch_next::<D, false, true, false, BIG, ROUND>(bytes, data64, scale),
+        b'+' if FIRST && !HAS => dispatch_next::<D, false, false, false, BIG, ROUND>(bytes, data64, scale),
+        b'_' if HAS => handle_separator::<D, POINT, NEG, BIG, ROUND>(bytes, data64, scale),
+        b => tail_invalid_digit::<D>(b),
     }
 }
 
 #[inline]
 fn byte_dispatch_u64<
+    D: DecConverter,
     const POINT: bool,
     const NEG: bool,
     const HAS: bool,
@@ -248,21 +288,21 @@ fn byte_dispatch_u64<
     data64: u64,
     scale: u8,
     b: u8,
-) -> Result<Decimal, Error> {
+) -> Result<D::Output, D::Error> {
     match b {
-        b'0'..=b'9' => handle_digit_64::<POINT, NEG, BIG, ROUND>(bytes, data64, scale, b - b'0'),
-        b'.' if !POINT => handle_point::<NEG, HAS, BIG, ROUND>(bytes, data64, scale),
-        b => non_digit_dispatch_u64::<POINT, NEG, HAS, BIG, FIRST, ROUND>(bytes, data64, scale, b),
+        b'0'..=b'9' => handle_digit_64::<D, POINT, NEG, BIG, ROUND>(bytes, data64, scale, b - b'0'),
+        b'.' if !POINT => handle_point::<D, NEG, HAS, BIG, ROUND>(bytes, data64, scale),
+        b => non_digit_dispatch_u64::<D, POINT, NEG, HAS, BIG, FIRST, ROUND>(bytes, data64, scale, b),
     }
 }
 
 #[inline(never)]
-fn handle_digit_64<const POINT: bool, const NEG: bool, const BIG: bool, const ROUND: bool>(
+fn handle_digit_64<D: DecConverter, const POINT: bool, const NEG: bool, const BIG: bool, const ROUND: bool>(
     bytes: &[u8],
     data64: u64,
     scale: u8,
     digit: u8,
-) -> Result<Decimal, Error> {
+) -> Result<D::Output, D::Error> {
     // we have already validated that we cannot overflow
     let data64 = data64 * 10 + digit as u64;
     let scale = if POINT { scale + 1 } else { 0 };
@@ -271,58 +311,58 @@ fn handle_digit_64<const POINT: bool, const NEG: bool, const BIG: bool, const RO
         let next = *next;
         if POINT && BIG && scale >= 28 {
             if ROUND {
-                maybe_round(data64 as u128, next, scale, POINT, NEG)
+                maybe_round::<D>(data64 as u128, next, scale, POINT, NEG)
             } else {
-                Err(Error::Underflow)
+                D::tail_error("underflow")
             }
         } else if BIG && overflow_64(data64) {
-            handle_full_128::<POINT, NEG, ROUND>(data64 as u128, bytes, scale, next)
+            handle_full_128::<D, POINT, NEG, ROUND>(data64 as u128, bytes, scale, next)
         } else {
-            byte_dispatch_u64::<POINT, NEG, true, BIG, false, ROUND>(bytes, data64, scale, next)
+            byte_dispatch_u64::<D, POINT, NEG, true, BIG, false, ROUND>(bytes, data64, scale, next)
         }
     } else {
         let data: u128 = data64 as u128;
 
-        handle_data::<NEG, true>(data, scale)
+        handle_data::<D, NEG, true>(data, scale)
     }
 }
 
 #[inline(never)]
-fn handle_point<const NEG: bool, const HAS: bool, const BIG: bool, const ROUND: bool>(
+fn handle_point<D: DecConverter, const NEG: bool, const HAS: bool, const BIG: bool, const ROUND: bool>(
     bytes: &[u8],
     data64: u64,
     scale: u8,
-) -> Result<Decimal, Error> {
-    dispatch_next::<true, NEG, HAS, BIG, ROUND>(bytes, data64, scale)
+) -> Result<D::Output, D::Error> {
+    dispatch_next::<D, true, NEG, HAS, BIG, ROUND>(bytes, data64, scale)
 }
 
 #[inline(never)]
-fn handle_separator<const POINT: bool, const NEG: bool, const BIG: bool, const ROUND: bool>(
+fn handle_separator<D: DecConverter, const POINT: bool, const NEG: bool, const BIG: bool, const ROUND: bool>(
     bytes: &[u8],
     data64: u64,
     scale: u8,
-) -> Result<Decimal, Error> {
-    dispatch_next::<POINT, NEG, true, BIG, ROUND>(bytes, data64, scale)
+) -> Result<D::Output, D::Error> {
+    dispatch_next::<D, POINT, NEG, true, BIG, ROUND>(bytes, data64, scale)
 }
 
 #[inline(never)]
 #[cold]
-fn tail_invalid_digit(digit: u8) -> Result<Decimal, Error> {
+fn tail_invalid_digit<D: DecConverter>(digit: u8) -> Result<D::Output, D::Error> {
     match digit {
-        b'.' => tail_error("Invalid decimal: two decimal points"),
-        b'_' => tail_error("Invalid decimal: must start lead with a number"),
-        _ => tail_error("Invalid decimal: unknown character"),
+        b'.' => D::tail_error("Invalid decimal: two decimal points"),
+        b'_' => D::tail_error("Invalid decimal: must start lead with a number"),
+        _ => D::tail_error("Invalid decimal: unknown character"),
     }
 }
 
 #[inline(never)]
 #[cold]
-fn handle_full_128<const POINT: bool, const NEG: bool, const ROUND: bool>(
+fn handle_full_128<D: DecConverter, const POINT: bool, const NEG: bool, const ROUND: bool>(
     mut data: u128,
     bytes: &[u8],
     scale: u8,
     next_byte: u8,
-) -> Result<Decimal, Error> {
+) -> Result<D::Output, D::Error> {
     let b = next_byte;
     match b {
         b'0'..=b'9' => {
@@ -332,13 +372,13 @@ fn handle_full_128<const POINT: bool, const NEG: bool, const ROUND: bool>(
             let next = (data * 10) + digit as u128;
             if overflow_128(next) {
                 if !POINT {
-                    return tail_error("Invalid decimal: overflow from too many digits");
+                    return D::tail_error("Invalid decimal: overflow from too many digits");
                 }
 
                 if ROUND {
-                    maybe_round(data, next_byte, scale, POINT, NEG)
+                    maybe_round::<D>(data, next_byte, scale, POINT, NEG)
                 } else {
-                    Err(Error::Underflow)
+                    return D::tail_error("underflow");
                 }
             } else {
                 data = next;
@@ -347,51 +387,51 @@ fn handle_full_128<const POINT: bool, const NEG: bool, const ROUND: bool>(
                     let next = *next;
                     if POINT && scale >= 28 {
                         if ROUND {
-                            maybe_round(data, next, scale, POINT, NEG)
+                            maybe_round::<D>(data, next, scale, POINT, NEG)
                         } else {
-                            Err(Error::Underflow)
+                            return D::tail_error("underflow");
                         }
                     } else {
-                        handle_full_128::<POINT, NEG, ROUND>(data, bytes, scale, next)
+                        handle_full_128::<D, POINT, NEG, ROUND>(data, bytes, scale, next)
                     }
                 } else {
-                    handle_data::<NEG, true>(data, scale)
+                    handle_data::<D, NEG, true>(data, scale)
                 }
             }
         }
         b'.' if !POINT => {
             // This call won't tail?
             if let Some((next, bytes)) = bytes.split_first() {
-                handle_full_128::<true, NEG, ROUND>(data, bytes, scale, *next)
+                handle_full_128::<D, true, NEG, ROUND>(data, bytes, scale, *next)
             } else {
-                handle_data::<NEG, true>(data, scale)
+                handle_data::<D, NEG, true>(data, scale)
             }
         }
         b'_' => {
             if let Some((next, bytes)) = bytes.split_first() {
-                handle_full_128::<POINT, NEG, ROUND>(data, bytes, scale, *next)
+                handle_full_128::<D, POINT, NEG, ROUND>(data, bytes, scale, *next)
             } else {
-                handle_data::<NEG, true>(data, scale)
+                handle_data::<D, NEG, true>(data, scale)
             }
         }
-        b => tail_invalid_digit(b),
+        b => tail_invalid_digit::<D>(b),
     }
 }
 
 #[inline(never)]
 #[cold]
-fn maybe_round(
+fn maybe_round<D: DecConverter>(
     mut data: u128,
     next_byte: u8,
     mut scale: u8,
     point: bool,
     negative: bool,
-) -> Result<Decimal, crate::Error> {
+) -> Result<D::Output, D::Error> {
     let digit = match next_byte {
         b'0'..=b'9' => u32::from(next_byte - b'0'),
         b'_' => 0, // this should be an invalid string?
         b'.' if point => 0,
-        b => return tail_invalid_digit(b),
+        b => return tail_invalid_digit::<D>(b),
     };
 
     // Round at midpoint
@@ -402,7 +442,7 @@ fn maybe_round(
         // next least significant digit and discard precision
         if overflow_128(data) {
             if scale == 0 {
-                return tail_error("Invalid decimal: overflow from mantissa after rounding");
+                return D::tail_error("Invalid decimal: overflow from mantissa after rounding");
             }
             data += 4;
             data /= 10;
@@ -411,30 +451,27 @@ fn maybe_round(
     }
 
     if negative {
-        handle_data::<true, true>(data, scale)
+        handle_data::<D, true, true>(data, scale)
     } else {
-        handle_data::<false, true>(data, scale)
+        handle_data::<D, false, true>(data, scale)
     }
 }
 
 #[inline(never)]
-fn tail_no_has() -> Result<Decimal, Error> {
-    tail_error("Invalid decimal: no digits found")
+fn tail_no_has<D: DecConverter>() -> Result<D::Output, D::Error> {
+    D::tail_error("Invalid decimal: no digits found")
 }
 
 #[inline]
-pub fn handle_data<const NEG: bool, const HAS: bool>(data: u128, scale: u8) -> Result<Decimal, Error> {
+pub fn handle_data<D: DecConverter, const NEG: bool, const HAS: bool>(
+    data: u128,
+    scale: u8,
+) -> Result<D::Output, D::Error> {
     debug_assert_eq!(data >> 96, 0);
     if !HAS {
-        tail_no_has()
+        tail_no_has::<D>()
     } else {
-        Ok(Decimal::from_parts(
-            data as u32,
-            (data >> 32) as u32,
-            (data >> 64) as u32,
-            NEG,
-            scale as u32,
-        ))
+        D::convert::<NEG>(data, scale)
     }
 }
 

@@ -658,7 +658,7 @@ impl Decimal {
     /// ```
     pub fn from_str_radix(str: &str, radix: u32) -> Result<Self, crate::Error> {
         if radix == 10 {
-            crate::str::parse_str_radix_10(str)
+            crate::str::parse_str_radix_10::<Decimal>(str)
         } else {
             crate::str::parse_str_radix_n(str, radix)
         }
@@ -1880,7 +1880,7 @@ impl FromStr for Decimal {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Decimal, Self::Err> {
-        crate::str::parse_str_radix_10(value)
+        crate::str::parse_str_radix_10::<Decimal>(value)
     }
 }
 

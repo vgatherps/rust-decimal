@@ -9,7 +9,7 @@ mod error;
 mod ops;
 mod str;
 
-pub use self::str::handle_data;
+pub use self::str::{parse_str_radix_10, DecConverter};
 
 // We purposely place this here for documentation ordering
 mod arithmetic_impls;
